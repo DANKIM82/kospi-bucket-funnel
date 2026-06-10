@@ -10,7 +10,7 @@ import sys, json, math
 import pandas as pd
 import numpy as np
 
-CYCLICAL_SECTORS = {'철강금속','철강','화학','운수장비','조선','운수창고','기계','전기가스업','건설업','종이목재','비금속광물'}
+CYCLICAL_SECTORS = {'조선·기계', '자동차', '반도체·전자', '화학·소재', '2차전지', '에너지·정유', '철강·금속', '건설·부동산', '운송·물류', '유틸리티'}
 
 def load(csv_path, enrich_path=None):
     df = pd.read_csv(csv_path, encoding='cp949')
@@ -26,11 +26,12 @@ def load(csv_path, enrich_path=None):
     df['mcap'] = df['종목코드'].map(lambda c: enrich.get(c, {}).get('mcap'))
     df['sector'] = df['종목코드'].map(lambda c: enrich.get(c, {}).get('sector', '미분류'))
     df['per_hist'] = df['종목코드'].map(lambda c: enrich.get(c, {}).get('per_hist_pct'))
-    df['pbr_hist'] = df['종목코드'].map(lambda c: enrich.get(c, {}).get('pbr_hist_pct'))
-    # 밸류 퍼센타일: 히스토리(자기 5년) 우선, 없으면 단면(전종목 비교)
+    df['px_hist'] = df['종목코드'].map(lambda c: enrich.get(c, {}).get('px_hist_pct'))
+    # 밸류 퍼센타일: PER 히스토리 > 가격 5년백분위 > 단면(전종목 비교) 순
     cross = df['PER'].rank(pct=True) * 100
-    df['PER_pct'] = df['per_hist'].fillna(cross)
-    df['val_basis'] = np.where(df['per_hist'].notna(), 'hist', 'cross')
+    df['PER_pct'] = df['per_hist'].fillna(df['px_hist']).fillna(cross)
+    df['val_basis'] = np.where(df['per_hist'].notna(), 'hist',
+                       np.where(df['px_hist'].notna(), 'px5y', 'cross'))
     # 구슬 크기: log(시총) 사분위 4단계 (시총 없으면 tier 1 균일)
     if df['mcap'].notna().sum() > 10:
         logm = np.log10(df['mcap'].astype(float))
@@ -140,7 +141,7 @@ b{font-weight:600}
 const DATA=__DATA__;
 const META=__META__;
 document.getElementById('meta').textContent=`${META.n}개 보통주 · 기준일 ${META.date} · ${META.enriched?'pykrx 보강 적용(시총·섹터·히스토리)':'보강 전 v1 — enrich.py 실행 후 재생성하면 시총·섹터 반영'}`;
-const SECC={'IT·전기전자':'#378ADD','화학':'#D4537E','운수장비':'#7F77DD','철강금속':'#D85A30','금융업':'#8A8980','의약품':'#639922','음식료품':'#E24B4A','유통업':'#E24B4A','건설업':'#BA7517','기계':'#BA7517','운수창고':'#BA7517','전기가스업':'#1D9E75','서비스업':'#378ADD','통신업':'#1D9E75','미분류':'#9B988F'};
+const SECC={"2차전지": "#1D9E75", "반도체·전자": "#378ADD", "IT·SW": "#34B891", "자동차": "#7F77DD", "조선·기계": "#BA7517", "철강·금속": "#D85A30", "화학·소재": "#D4537E", "에너지·정유": "#C26A3D", "바이오·제약": "#639922", "음식료": "#E24B4A", "소비재·유통": "#C2504F", "건설·부동산": "#A88030", "운송·물류": "#8A6508", "금융": "#6E7B8E", "지주·기타": "#8E99A8", "유틸리티": "#1D9E75", "미분류": "#9B988F"};
 const secCol=s=>SECC[s]||'#6E7B8E';
 const BK=[{id:'L1',nm:'싸진 우량주',c:'#1F7A4D',rule:'싸다 + ROE 강함'},
  {id:'L2',nm:'바닥 탈출',c:'#BA7517',rule:'경기순환 + 이익 회복'},
@@ -261,7 +262,7 @@ function stockCard(d){
   <span style="color:var(--ter);font-size:12px">${d.c} · ${d.sec}${d.cyc?' · 경기순환':''}</span>
   <span class="pill" style="background:${bk.c}22;color:${bk.c}">1차: ${bk.nm}</span>
   ${fin?`<span class="pill" style="background:${fin.c}22;color:${fin.c}">2차: ${fin.nm} (${d.sc}/6)</span>`:''}</div>
- <div style="font-size:12.5px;color:var(--mut);margin-bottom:8px">PER ${fmt(d.per)} · PBR ${fmt(d.pbr)} · ROE ${fmt(d.roe,'%')} · 이익성장 ${fmt(d.g,'%')} · 배당 ${fmt(d.dy,'%')} · 밸류 퍼센타일 ${fmt(d.vp)}${d.vb==='hist'?' (5년 히스토리)':' (단면)'}</div>${checks}
+ <div style="font-size:12.5px;color:var(--mut);margin-bottom:8px">PER ${fmt(d.per)} · PBR ${fmt(d.pbr)} · ROE ${fmt(d.roe,'%')} · 이익성장 ${fmt(d.g,'%')} · 배당 ${fmt(d.dy,'%')} · 밸류 퍼센타일 ${fmt(d.vp)}${d.vb==='hist'?' (PER 5년)':d.vb==='px5y'?' (가격 5년백분위)':' (단면)'}</div>${checks}
  <div style="font-size:11px;color:var(--ter);margin-top:6px">조사 우선순위 표시일 뿐, 매수/매도 판정이 아닙니다.</div>`;
  $('card').scrollIntoView({behavior:'smooth',block:'nearest'});}
 function binPanel(i,isFin){

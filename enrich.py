@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-enrich.py — pykrx로 시총·섹터·5년 밸류 히스토리 퍼센타일 수집 → enrichment.json
-[로컬 실행용] pip install pykrx pandas
+enrich.py — FinanceDataReader로 시총·섹터(·5년 가격백분위) → enrichment.json
+[로컬 실행용] pip install finance-datareader
+
+시총: StockListing('KRX')의 Marcap
+섹터: StockListing('KRX-DESC')의 Industry(표준산업분류)를 큰 그룹으로 매핑 (sector_map.py)
 사용법:
-  python enrich.py 20260610          # 기준일 (CSV 기준일과 맞추기)
+  python enrich.py 20260609 --light    # 시총+섹터만 (빠름, 권장)
+  python enrich.py 20260609            # + 5년 가격백분위
 이후:
   python process.py data_5605_20260610.csv enrichment.json
 """
@@ -12,74 +16,65 @@ import sys, json, time
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from pykrx import stock
+import FinanceDataReader as fdr
+from sector_map import industry_to_group
 
-def main():
-    date = sys.argv[1] if len(sys.argv) > 1 else datetime.today().strftime('%Y%m%d')
-    print(f"기준일 {date} — KOSPI")
+def get_marcap():
+    df = fdr.StockListing('KRX')
+    df['Code'] = df['Code'].astype(str).str.zfill(6)
+    return dict(zip(df['Code'], df['Marcap']))
 
-    # 1) 시가총액 (구슬 크기 사분위용)
-    print("[1/3] 시가총액…")
-    cap = stock.get_market_cap_by_ticker(date, market="KOSPI")  # index=티커
-    mcap = cap['시가총액'].to_dict()
+def get_sectors():
+    df = fdr.StockListing('KRX-DESC')
+    df['Code'] = df['Code'].astype(str).str.zfill(6)
+    if 'Industry' not in df.columns:
+        return {}
+    df = df.dropna(subset=['Industry'])
+    return {c: industry_to_group(ind) for c, ind in zip(df['Code'], df['Industry'])}
 
-    # 2) 섹터 — KRX 업종지수(1005~) 구성종목으로 매핑
-    print("[2/3] 섹터(업종지수 구성종목)…")
-    sector = {}
-    for idx_code in stock.get_index_ticker_list(market="KOSPI"):
-        name = stock.get_index_ticker_name(idx_code)
-        # 업종지수만 (코스피 200 등 전략지수 제외): '코스피 ' 접두 업종명 패턴
-        if not name.startswith('코스피 '):
-            continue
-        sec_name = name.replace('코스피 ', '')
-        if sec_name in ('200', '100', '50', '대형주', '중형주', '소형주', '배당성장 50'):
-            continue
-        try:
-            for t in stock.get_index_portfolio_deposit_file(idx_code, date):
-                sector.setdefault(t, sec_name)
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"  skip {name}: {e}")
-
-    # 3) 5년 밸류 히스토리 → 현재 PER/PBR의 자기-히스토리 퍼센타일
-    #    (종목별 800회 호출 대신, 월말 스냅샷 60회로 전종목 일괄 수집)
-    print("[3/3] 5년 월별 밸류 스냅샷 (약 60회 호출, 수 분 소요)…")
+def get_px_pct(codes, date):
     end = datetime.strptime(date, '%Y%m%d')
-    frames = []
-    for m in range(60, -1, -1):
-        d = (end - relativedelta(months=m)).strftime('%Y%m%d')
+    start = (end - relativedelta(years=5)).strftime('%Y-%m-%d')
+    out = {}
+    for i, c in enumerate(codes):
         try:
-            f = stock.get_market_fundamental_by_ticker(d, market="KOSPI")[['PER', 'PBR']]
-            f['date'] = d
-            frames.append(f.reset_index())
-            time.sleep(0.4)
+            h = fdr.DataReader(c, start, end.strftime('%Y-%m-%d'))
+            if len(h) >= 250:
+                cur = h['Close'].iloc[-1]
+                out[c] = round(float((h['Close'] < cur).mean()*100), 0)
         except Exception:
             pass
-    hist = pd.concat(frames)
-    hist = hist[(hist['PER'] > 0) & (hist['PBR'] > 0)]
+        if i % 50 == 0: print(f"  히스토리 {i}/{len(codes)}…")
+        time.sleep(0.05)
+    return out
 
-    cur = stock.get_market_fundamental_by_ticker(date, market="KOSPI")[['PER', 'PBR']]
-    per_pct, pbr_pct = {}, {}
-    for t, g in hist.groupby('티커'):
-        if t not in cur.index or len(g) < 24:   # 최소 2년 히스토리
-            continue
-        cp, cb = cur.loc[t, 'PER'], cur.loc[t, 'PBR']
-        if cp > 0:
-            per_pct[t] = round(float((g['PER'] < cp).mean() * 100), 0)
-        if cb > 0:
-            pbr_pct[t] = round(float((g['PBR'] < cb).mean() * 100), 0)
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    date = args[0] if args else datetime.today().strftime('%Y%m%d')
+    light = '--light' in sys.argv
+    print(f"기준일 {date} — FinanceDataReader")
+
+    print("[1/3] 시가총액 (StockListing KRX)…")
+    mcap = get_marcap(); print(f"  {len(mcap)}종목")
+
+    print("[2/3] 섹터 (KRX-DESC Industry → 그룹)…")
+    sector = get_sectors(); print(f"  {len(sector)}종목 매핑")
+
+    codes = [c for c in mcap if c.endswith('0')]
+    px = {}
+    if light:
+        print("[3/3] 히스토리 생략(--light)")
+    else:
+        print(f"[3/3] 5년 가격 백분위 ({len(codes)}종목)…")
+        px = get_px_pct(codes, date)
 
     out = {}
-    for t in cap.index:
-        out[t] = {'mcap': int(mcap.get(t, 0)),
-                  'sector': sector.get(t, '미분류'),
-                  'per_hist_pct': per_pct.get(t),
-                  'pbr_hist_pct': pbr_pct.get(t)}
-    with open('enrichment.json', 'w', encoding='utf-8') as f:
-        json.dump(out, f, ensure_ascii=False)
-    n_sec = sum(1 for v in out.values() if v['sector'] != '미분류')
-    n_hist = sum(1 for v in out.values() if v['per_hist_pct'] is not None)
-    print(f"완료 — {len(out)}종목 / 섹터 {n_sec} / 히스토리 퍼센타일 {n_hist}")
+    for c in mcap:
+        out[c] = {'mcap': int(mcap.get(c,0)), 'sector': sector.get(c,'미분류'),
+                  'per_hist_pct': None, 'pbr_hist_pct': None, 'px_hist_pct': px.get(c)}
+    json.dump(out, open('enrichment.json','w',encoding='utf-8'), ensure_ascii=False)
+    print(f"완료 — 시총 {sum(1 for v in out.values() if v['mcap']>0)} / "
+          f"섹터 {sum(1 for v in out.values() if v['sector']!='미분류')} / 가격백분위 {len(px)}")
     print("→ enrichment.json 생성. 이제: python process.py <CSV> enrichment.json")
 
 if __name__ == '__main__':
